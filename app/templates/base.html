@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}IGSN Registry{% endblock %}</title>
+<style>
+  :root {
+    --bg: #fbfaf8; --fg: #1c1a17; --muted: #6b6660; --rule: #e2ded7;
+    --card: #ffffff; --accent: #7a4b1e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #171614; --fg: #ece8e1; --muted: #9b958c; --rule: #302d29;
+      --card: #1f1e1b; --accent: #d99c5c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 46rem; margin: 0 auto; padding: 3rem 1.25rem 5rem; }
+  a { color: var(--accent); }
+  h1 { font-size: 1.5rem; margin: 0 0 .25rem; letter-spacing: -.01em; }
+  .igsn {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 1.05rem; color: var(--muted);
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--rule);
+    border-radius: 10px; padding: 1.25rem 1.5rem; margin-top: 1.5rem;
+  }
+  dl { display: grid; grid-template-columns: minmax(8rem, 12rem) 1fr; gap: .5rem 1.25rem; margin: 0; }
+  dt { color: var(--muted); font-size: .85rem; text-transform: uppercase; letter-spacing: .04em; }
+  dd { margin: 0; }
+  .badge {
+    display: inline-block; padding: .15rem .55rem; border-radius: 999px;
+    font-size: .75rem; text-transform: uppercase; letter-spacing: .05em;
+    border: 1px solid var(--rule); color: var(--muted);
+  }
+  .badge.findable { border-color: #2f7d4f; color: #2f7d4f; }
+  .badge.failed, .badge.revoked { border-color: #a33; color: #a33; }
+  footer { margin-top: 3rem; color: var(--muted); font-size: .85rem; }
+  ul.plain { list-style: none; padding: 0; margin: 0; }
+  .overflow { overflow-x: auto; }
+</style>
+</head>
+<body>
+<main>
+{% block content %}{% endblock %}
+<footer>IGSN registry &middot; identifiers for physical samples</footer>
+</main>
+</body>
+</html>

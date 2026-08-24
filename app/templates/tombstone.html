@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}{{ record.igsn }} (withdrawn){% endblock %}
+{% block content %}
+<h1>This identifier has been withdrawn</h1>
+<div class="igsn">{{ record.igsn }}</div>
+<p><span class="badge revoked">revoked</span></p>
+<div class="card">
+  <p>
+    The IGSN <strong>{{ record.igsn }}</strong> was reserved but has since been
+    withdrawn. It will never be reassigned to another sample.
+  </p>
+</div>
+{% endblock %}

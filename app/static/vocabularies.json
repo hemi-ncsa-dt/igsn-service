@@ -1,0 +1,142 @@
+{
+  "institutions": {
+    "AP": {
+      "code": "AP",
+      "labs": {
+        "L": "APL"
+      },
+      "name": "JHU Applied Physics Laboratory"
+    },
+    "CM": {
+      "code": "CM",
+      "labs": {
+        "X": "Other"
+      },
+      "name": "Carnegie Mellon University"
+    },
+    "JH": {
+      "code": "JH",
+      "labs": {
+        "A": "Hopkins Extreme Materials Institute",
+        "B": "Weihs Group",
+        "X": "Other"
+      },
+      "name": "Johns Hopkins University"
+    },
+    "ML": {
+      "code": "ML",
+      "labs": {
+        "X": "Other"
+      },
+      "name": "University of Massachusetts, Lowell"
+    },
+    "NW": {
+      "code": "NW",
+      "labs": {
+        "X": "Other"
+      },
+      "name": "Northwestern University"
+    },
+    "SB": {
+      "code": "SB",
+      "labs": {
+        "X": "Other"
+      },
+      "name": "University of California, Santa Barbara"
+    },
+    "TM": {
+      "code": "TM",
+      "labs": {
+        "A": "MESAM",
+        "X": "Other"
+      },
+      "name": "Texas A&M University"
+    }
+  },
+  "materials": {
+    "BM": {
+      "name": "biomaterials"
+    },
+    "BO": {
+      "name": "biological"
+    },
+    "CR": {
+      "name": "ceramics",
+      "subcategories": {
+        "A": "carbides",
+        "B": "cements",
+        "C": "nitrides",
+        "D": "oxides",
+        "E": "perovskites",
+        "F": "silicates"
+      }
+    },
+    "MA": {
+      "name": "metals and alloys",
+      "subcategories": {
+        "A": "Al-containing",
+        "B": "commercially pure metals",
+        "C": "Cu-containing",
+        "D": "Fe-containing",
+        "E": "intermetallics",
+        "F": "Mg-containing",
+        "G": "Ni-containing",
+        "H": "rare earth",
+        "I": "refractories",
+        "J": "steels",
+        "K": "superalloys",
+        "L": "Ti-containing"
+      }
+    },
+    "ME": {
+      "name": "metamaterials"
+    },
+    "MO": {
+      "name": "molecular fluids"
+    },
+    "OC": {
+      "name": "organic compounds",
+      "subcategories": {
+        "A": "alcohols",
+        "B": "aldehydes",
+        "C": "alkanes",
+        "D": "alkenes",
+        "E": "alkynes",
+        "F": "amines",
+        "G": "carboxylic acids",
+        "H": "cyclic compounds",
+        "I": "cycloalkanes",
+        "J": "esters",
+        "K": "ketones",
+        "L": "nitriles"
+      }
+    },
+    "OG": {
+      "name": "organometallics"
+    },
+    "PL": {
+      "name": "polymers",
+      "subcategories": {
+        "A": "copolymers",
+        "B": "elastomers",
+        "C": "homopolymers",
+        "D": "liquid crystals",
+        "E": "polymer blends",
+        "F": "rubbers",
+        "G": "thermoplastics",
+        "H": "thermosets"
+      }
+    },
+    "SM": {
+      "name": "semiconductors",
+      "subcategories": {
+        "A": "extrinsic",
+        "B": "II-VI",
+        "C": "III-V",
+        "D": "intrinsic",
+        "E": "n-type",
+        "F": "p-type"
+      }
+    }
+  }
+}

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% set titles = metadata.get("titles") or [] %}
+{% block title %}{{ titles[0].title if titles else record.igsn }}{% endblock %}
+{% block content %}
+<h1>{{ titles[0].title if titles else "Material sample" }}</h1>
+<div class="igsn">{{ record.igsn }}</div>
+<p><span class="badge {{ record.status }}">{{ record.status }}</span></p>
+
+<div class="card">
+  <dl>
+    <dt>DOI</dt>
+    <dd><a href="https://doi.org/{{ record.doi }}">{{ record.doi }}</a></dd>
+
+    {% if metadata.get("publisher") %}
+    <dt>Publisher</dt>
+    <dd>{{ metadata.publisher.name if metadata.publisher is mapping else metadata.publisher }}</dd>
+    {% endif %}
+
+    {% if metadata.get("publicationYear") %}
+    <dt>Year</dt><dd>{{ metadata.publicationYear }}</dd>
+    {% endif %}
+
+    {% if metadata.get("creators") %}
+    <dt>Creators</dt>
+    <dd><ul class="plain">
+      {% for creator in metadata.creators %}<li>{{ creator.get("name", "") }}</li>{% endfor %}
+    </ul></dd>
+    {% endif %}
+
+    {% if metadata.get("types") %}
+    <dt>Type</dt>
+    <dd>{{ metadata.types.get("resourceType", "material sample") }}</dd>
+    {% endif %}
+
+    {% if record.parent_igsn %}
+    <dt>Part of</dt>
+    <dd><a href="/{{ record.parent_igsn }}">{{ record.parent_igsn }}</a></dd>
+    {% endif %}
+
+    {% for identifier in metadata.get("alternateIdentifiers") or [] %}
+    <dt>{{ identifier.get("alternateIdentifierType", "Alternate") }} ID</dt>
+    <dd>{{ identifier.get("alternateIdentifier") }}</dd>
+    {% endfor %}
+  </dl>
+</div>
+
+{% set descriptions = metadata.get("descriptions") or [] %}
+{% if descriptions %}
+<div class="card">
+  {% for description in descriptions %}
+  <dt>{{ description.get("descriptionType", "Description") }}</dt>
+  <p>{{ description.get("description") }}</p>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}
