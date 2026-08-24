@@ -38,7 +38,7 @@ async def allocate_identifiers(body: AllocateRequest, tenant: dict = TenantDep):
         )
     except allocator.PrefixError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except allocator.MetadataError as exc:
+    except (allocator.MetadataError, allocator.LandingPageError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except allocator.AllocationError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -61,7 +61,7 @@ async def allocate_children(igsn: str, body: ChildrenRequest, tenant: dict = Ten
             metadata=body.metadata,
             local_identifiers=body.local_identifiers,
         )
-    except allocator.MetadataError as exc:
+    except (allocator.MetadataError, allocator.LandingPageError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except allocator.AllocationError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

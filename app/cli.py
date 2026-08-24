@@ -278,6 +278,64 @@ async def sync_status(
     return {"published": found, "unpublished": unpublished, "errors": errors}
 
 
+async def fix_landing_pages(
+    *, tenant_slug: str | None = None, dry_run: bool = False, db=None
+) -> dict:
+    """Clear landing pages DataCite will not accept.
+
+    A publishing system whose server-root setting is empty sends things like
+    ``"#igsn/JHBBMX00001"``. Clearing the field makes the record fall back to
+    this service's own resolver, which is the designed default and always valid.
+
+    Published records are left alone: their URL is already registered at
+    DataCite, and changing it is a deliberate act, not a cleanup.
+    """
+    from .services.datacite import InvalidLandingUrl, validate_landing_url
+
+    db = db if db is not None else get_db()
+    query: dict = {"landing_page": {"$nin": [None, ""]}}
+    if tenant_slug:
+        query["tenant"] = tenant_slug
+
+    cleared, kept, skipped_published = 0, 0, 0
+    examples: list[str] = []
+    async for record in db[RECORDS].find(query, {"igsn": 1, "landing_page": 1, "status": 1}):
+        try:
+            validate_landing_url(record["landing_page"])
+        except InvalidLandingUrl as exc:
+            if record.get("status") in ("registered", "findable"):
+                logger.warning(
+                    "%s is published with an invalid landing page (%s); leaving it alone",
+                    record["igsn"],
+                    exc,
+                )
+                skipped_published += 1
+                continue
+            if len(examples) < 5:
+                examples.append(f"{record['igsn']}: {record['landing_page']!r}")
+            cleared += 1
+            if not dry_run:
+                await db[RECORDS].update_one(
+                    {"_id": record["_id"]},
+                    {
+                        "$set": {
+                            "landing_page": None,
+                            "updated": datetime.datetime.now(datetime.UTC),
+                        },
+                        "$unset": {"metadata.url": ""},
+                    },
+                )
+            continue
+        kept += 1
+
+    return {
+        "cleared": cleared,
+        "kept": kept,
+        "skipped_published": skipped_published,
+        "examples": examples,
+    }
+
+
 async def verify(*, db=None) -> dict:
     """Compare counters against the records that exist. Pre-flight for cutover."""
     db = db if db is not None else get_db()
@@ -471,6 +529,27 @@ def cli_sync_status(tenant_slug, prefix, dry_run):
     click.echo(f"Not yet published: {result['unpublished']}")
     if result["errors"]:
         click.echo(f"Lookup errors: {result['errors']}", err=True)
+
+
+@cli.command("fix-landing-pages")
+@click.option("--tenant", "tenant_slug", default=None, help="Limit to one tenant.")
+@click.option("--dry-run", is_flag=True)
+def cli_fix_landing_pages(tenant_slug, dry_run):
+    """Clear landing pages DataCite would reject, falling back to the resolver."""
+
+    async def inner():
+        return await fix_landing_pages(tenant_slug=tenant_slug, dry_run=dry_run)
+
+    result = _run(inner)
+    click.echo(f"{'Would clear' if dry_run else 'Cleared'}: {result['cleared']}")
+    click.echo(f"Already valid: {result['kept']}")
+    if result["skipped_published"]:
+        click.echo(
+            f"Published with a bad URL, left alone: {result['skipped_published']} "
+            "(fix these deliberately -- the URL is already registered at DataCite)"
+        )
+    for example in result["examples"]:
+        click.echo(f"  {example}")
 
 
 @cli.command("verify")

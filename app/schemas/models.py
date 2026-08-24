@@ -68,6 +68,8 @@ class PublishRequest(BaseModel):
 class DataCiteState(BaseModel):
     last_sync: datetime | None = None
     last_error: str | None = None
+    # What the last submission actually sent -- see AttemptOut.last_request.
+    last_request: dict[str, Any] | None = None
     attempts: int = 0
 
 
@@ -95,6 +97,24 @@ class AllocateResponse(BaseModel):
 class PublishResponse(BaseModel):
     attempts: list[str]
     queued: int
+
+
+class AttemptOut(BaseModel):
+    """One publication attempt, with what was sent and what came back."""
+
+    id: str
+    igsn: str
+    target: str
+    status: str
+    attempts: int = 0
+    last_error: str | None = None
+    # Summary of the request that produced last_error. DataCite's validation
+    # errors name a field but never echo its value, so this is what makes a 422
+    # actionable.
+    last_request: dict[str, Any] | None = None
+    next_attempt_at: datetime | None = None
+    created: datetime | None = None
+    updated: datetime | None = None
 
 
 class VocabulariesOut(BaseModel):

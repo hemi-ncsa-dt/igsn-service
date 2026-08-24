@@ -464,3 +464,145 @@ class TestAdmin:
         assert response.status_code == 200
         counter = await database["counters"].find_one({"_id": "JHAMAA"})
         assert counter["seq"] == 900
+
+
+class TestAttemptsEndpoint:
+    """Debugging a failed publish without needing database access."""
+
+    @pytest.fixture
+    async def record(self, database, tenant, metadata):
+        docs = await allocator.allocate("JHAMAA", 1, tenant, metadata=metadata)
+        return docs[0]
+
+    async def test_empty_before_any_publish(self, client, auth, record):
+        response = await client.get(
+            f"/api/v1/records/{record['igsn']}/attempts", headers=auth
+        )
+        assert response.status_code == 200
+        assert response.json() == []
+
+    @respx.mock
+    async def test_failed_attempt_explains_itself(self, client, auth, database, record):
+        """The whole point: a 422 traceable to the value that caused it."""
+        from app.services import publisher
+
+        respx.post("https://api.test.datacite.org/dois").mock(
+            return_value=httpx.Response(
+                422,
+                text='{"errors":[{"source":"url","title":"URL is not valid"}]}',
+            )
+        )
+        await client.post(f"/api/v1/records/{record['igsn']}/publish", headers=auth, json={})
+        await publisher.drain_once(database)
+
+        response = await client.get(
+            f"/api/v1/records/{record['igsn']}/attempts", headers=auth
+        )
+        assert response.status_code == 200
+        attempt = response.json()[0]
+        assert attempt["status"] == "failed"
+        assert "URL is not valid" in attempt["last_error"]
+        assert attempt["last_request"]["url"] == f"https://igsn.example.org/{record['igsn']}"
+        # And the message names what we sent, which DataCite's does not.
+        assert "we sent url=" in attempt["last_error"]
+
+    @respx.mock
+    async def test_record_surfaces_the_last_request(self, client, auth, database, record):
+        from app.services import publisher
+
+        respx.post("https://api.test.datacite.org/dois").mock(
+            return_value=httpx.Response(422, text='{"errors":[{"source":"url"}]}')
+        )
+        await client.post(f"/api/v1/records/{record['igsn']}/publish", headers=auth, json={})
+        await publisher.drain_once(database)
+
+        response = await client.get(f"/api/v1/records/{record['igsn']}", headers=auth)
+        datacite_state = response.json()["datacite"]
+        assert datacite_state["last_request"]["method"] == "POST"
+        assert datacite_state["attempts"] == 1
+
+    async def test_other_tenants_record_is_404(self, client, other_tenant, record):
+        headers = {"Authorization": f"Bearer {other_tenant['_token']}"}
+        response = await client.get(
+            f"/api/v1/records/{record['igsn']}/attempts", headers=headers
+        )
+        assert response.status_code == 404
+
+    async def test_requires_auth(self, client, record):
+        response = await client.get(f"/api/v1/records/{record['igsn']}/attempts")
+        assert response.status_code == 401
+
+
+class TestLandingPageValidation:
+    """Reject an unusable landing page at the door, not at publish time."""
+
+    @pytest.fixture
+    async def record(self, database, tenant, metadata):
+        docs = await allocator.allocate("JHAMAA", 1, tenant, metadata=metadata)
+        return docs[0]
+
+    async def test_put_rejects_a_bare_fragment(self, client, auth, record):
+        """This is exactly what Girder sent when its server_root was unset."""
+        response = await client.put(
+            f"/api/v1/records/{record['igsn']}",
+            headers=auth,
+            json={"landing_page": "#igsn/JHAMAA00001"},
+        )
+        assert response.status_code == 422
+        assert "#igsn/JHAMAA00001" in response.json()["detail"]
+        assert "server-root" in response.json()["detail"]
+
+    async def test_put_rejects_localhost(self, client, auth, record):
+        response = await client.put(
+            f"/api/v1/records/{record['igsn']}",
+            headers=auth,
+            json={"landing_page": "http://localhost:8080/x"},
+        )
+        assert response.status_code == 422
+
+    async def test_the_bad_value_is_not_stored(self, client, auth, database, record):
+        await client.put(
+            f"/api/v1/records/{record['igsn']}",
+            headers=auth,
+            json={"landing_page": "#igsn/JHAMAA00001"},
+        )
+        stored = await database["records"].find_one({"igsn": record["igsn"]})
+        assert stored["landing_page"] != "#igsn/JHAMAA00001"
+
+    async def test_put_accepts_a_real_url(self, client, auth, record):
+        response = await client.put(
+            f"/api/v1/records/{record['igsn']}",
+            headers=auth,
+            json={"landing_page": "https://data.htmdec.org/#igsn/JHAMAA00001"},
+        )
+        assert response.status_code == 200
+        assert response.json()["landing_page"] == (
+            "https://data.htmdec.org/#igsn/JHAMAA00001"
+        )
+
+    async def test_allocate_rejects_a_bad_landing_page(self, client, auth, metadata):
+        response = await client.post(
+            "/api/v1/identifiers",
+            headers=auth,
+            json={
+                "prefix": "JHAMAA",
+                "metadata": metadata,
+                "landing_page": "#igsn/whatever",
+            },
+        )
+        assert response.status_code == 422
+
+    async def test_a_bad_tenant_template_is_caught_at_allocation(
+        self, client, database, tenant, metadata
+    ):
+        """A misconfigured template should fail loudly on the first mint."""
+        await database["tenants"].update_one(
+            {"slug": tenant["slug"]}, {"$set": {"landing_template": "#igsn/{igsn}"}}
+        )
+        response = await client.post(
+            "/api/v1/identifiers",
+            headers={"Authorization": f"Bearer {tenant['_token']}"},
+            json={"prefix": "JHAMAA", "metadata": metadata},
+        )
+        assert response.status_code == 422
+        assert "#igsn/JHAMAA" in response.json()["detail"]

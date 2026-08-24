@@ -451,3 +451,131 @@ class TestSyncStatus:
         await cli.sync_status(tenant_slug=tenant["slug"], dry_run=True, db=database)
         record = await database["records"].find_one({"igsn": "JHAMAA00001"})
         assert record["status"] == "reserved"
+
+
+class TestFixLandingPages:
+    """Repairing records that already carry a URL DataCite will not accept."""
+
+    async def test_clears_a_bare_fragment(self, database, tenant):
+        await database["records"].insert_one(
+            {
+                "igsn": "JHBBMX00001",
+                "doi": "10.83961/jhbbmx00001",
+                "prefix": "JHBBMX",
+                "tenant": tenant["slug"],
+                "status": "reserved",
+                "landing_page": "#igsn/JHBBMX00001",
+                "metadata": {"url": "#igsn/JHBBMX00001"},
+            }
+        )
+        result = await cli.fix_landing_pages(db=database)
+        assert result["cleared"] == 1
+
+        record = await database["records"].find_one({"igsn": "JHBBMX00001"})
+        # Cleared, not patched to a guess: the service's own resolver takes over,
+        # which is the designed default and always valid.
+        assert record["landing_page"] is None
+        assert "url" not in record["metadata"]
+
+    async def test_leaves_valid_landing_pages_alone(self, database, tenant):
+        await database["records"].insert_one(
+            {
+                "igsn": "JHBBMX00002",
+                "doi": "10.83961/jhbbmx00002",
+                "prefix": "JHBBMX",
+                "tenant": tenant["slug"],
+                "status": "reserved",
+                "landing_page": "https://data.htmdec.org/#igsn/JHBBMX00002",
+            }
+        )
+        result = await cli.fix_landing_pages(db=database)
+        assert result == {
+            "cleared": 0,
+            "kept": 1,
+            "skipped_published": 0,
+            "examples": [],
+        }
+
+    async def test_will_not_touch_a_published_record(self, database, tenant):
+        """Its URL is registered at DataCite; changing it is a deliberate act."""
+        await database["records"].insert_one(
+            {
+                "igsn": "JHBBMX00003",
+                "doi": "10.83961/jhbbmx00003",
+                "prefix": "JHBBMX",
+                "tenant": tenant["slug"],
+                "status": "findable",
+                "landing_page": "#igsn/JHBBMX00003",
+            }
+        )
+        result = await cli.fix_landing_pages(db=database)
+        assert result["skipped_published"] == 1
+        assert result["cleared"] == 0
+        record = await database["records"].find_one({"igsn": "JHBBMX00003"})
+        assert record["landing_page"] == "#igsn/JHBBMX00003"
+
+    async def test_dry_run_writes_nothing(self, database, tenant):
+        await database["records"].insert_one(
+            {
+                "igsn": "JHBBMX00004",
+                "doi": "10.83961/jhbbmx00004",
+                "prefix": "JHBBMX",
+                "tenant": tenant["slug"],
+                "status": "reserved",
+                "landing_page": "#igsn/JHBBMX00004",
+            }
+        )
+        result = await cli.fix_landing_pages(db=database, dry_run=True)
+        assert result["cleared"] == 1
+        assert result["examples"] == ["JHBBMX00004: '#igsn/JHBBMX00004'"]
+        record = await database["records"].find_one({"igsn": "JHBBMX00004"})
+        assert record["landing_page"] == "#igsn/JHBBMX00004"
+
+    async def test_can_be_scoped_to_one_tenant(self, database, tenant, other_tenant):
+        for slug, igsn in ((tenant["slug"], "JHBBMX00005"), (other_tenant["slug"], "TMAMAA00001")):
+            await database["records"].insert_one(
+                {
+                    "igsn": igsn,
+                    "doi": f"10.1/{igsn.lower()}",
+                    "prefix": igsn[:6],
+                    "tenant": slug,
+                    "status": "reserved",
+                    "landing_page": f"#igsn/{igsn}",
+                }
+            )
+        result = await cli.fix_landing_pages(tenant_slug=tenant["slug"], db=database)
+        assert result["cleared"] == 1
+        untouched = await database["records"].find_one({"igsn": "TMAMAA00001"})
+        assert untouched["landing_page"] == "#igsn/TMAMAA00001"
+
+    async def test_repaired_record_then_publishes(self, database, tenant, metadata):
+        """End to end: repair, then the preflight no longer objects."""
+        import httpx
+        import respx
+
+        from app.services import allocator, publisher
+
+        docs = await allocator.allocate("JHAMAA", 1, tenant, metadata=metadata)
+        igsn = docs[0]["igsn"]
+        await database["records"].update_one(
+            {"igsn": igsn}, {"$set": {"landing_page": f"#igsn/{igsn}"}}
+        )
+
+        await publisher.enqueue(igsn, tenant, "findable")
+        await publisher.drain_once(database)
+        assert (await database["records"].find_one({"igsn": igsn}))["status"] == "failed"
+
+        await cli.fix_landing_pages(db=database)
+        with respx.mock:
+            respx.post("https://api.test.datacite.org/dois").mock(
+                return_value=httpx.Response(201, json={})
+            )
+            await publisher.enqueue(igsn, tenant, "findable")
+            await publisher.drain_once(database)
+
+        record = await database["records"].find_one({"igsn": igsn})
+        assert record["status"] == "findable"
+        # And the resolver URL is what got registered.
+        assert record["datacite"]["last_request"]["url"] == (
+            f"https://igsn.example.org/{igsn}"
+        )

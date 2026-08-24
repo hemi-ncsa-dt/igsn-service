@@ -1,6 +1,7 @@
 from .models import (  # noqa: F401
     AllocateRequest,
     AllocateResponse,
+    AttemptOut,
     ChildrenRequest,
     PublishRequest,
     PublishResponse,

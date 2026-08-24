@@ -30,6 +30,7 @@ from .vocab import PrefixError, get_vocabularies, validate_prefix
 
 __all__ = [
     "AllocationError",
+    "LandingPageError",
     "MetadataError",
     "PrefixError",
     "allocate",
@@ -56,6 +57,10 @@ class AllocationError(RuntimeError):
 
 class MetadataError(ValueError):
     """Metadata failed DataCite schema validation."""
+
+
+class LandingPageError(ValueError):
+    """A landing page is not a URL DataCite will accept."""
 
 
 def _now() -> datetime.datetime:
@@ -96,12 +101,24 @@ def doi_for(igsn: str, doi_prefix: str) -> str:
 
 
 def landing_page_for(igsn: str, tenant: dict, explicit: str | None = None) -> str | None:
-    if explicit:
-        return explicit
-    template = tenant.get("landing_template")
-    if not template:
-        return None
-    return template.replace("{igsn}", igsn)
+    """Resolve a record's landing page, or None to use the central resolver.
+
+    Whatever comes back here is what gets registered with DataCite, so an
+    unusable value is validated now rather than surviving until publication.
+    """
+    candidate = explicit
+    if not candidate:
+        template = tenant.get("landing_template")
+        if not template:
+            return None
+        candidate = template.replace("{igsn}", igsn)
+
+    from .datacite import InvalidLandingUrl, validate_landing_url
+
+    try:
+        return validate_landing_url(candidate)
+    except InvalidLandingUrl as exc:
+        raise LandingPageError(str(exc)) from exc
 
 
 def _record_doc(

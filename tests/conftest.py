@@ -38,17 +38,32 @@ TEST_DB_NAME = "igsn_test"
 # WiredTiger files to panic the server, and index creation is idempotent anyway.
 _indexes_ready = False
 
+# Probe the server once. Retrying per test turned a stopped container into
+# "25 passed, 144 skipped" after seven minutes of timeouts -- which reads like a
+# pass at a glance and is the last thing you want from a suite whose whole job
+# is guarding identifier uniqueness.
+_unavailable: str | None = None
+
 
 @pytest_asyncio.fixture
 async def database():
-    global _indexes_ready
+    global _indexes_ready, _unavailable
 
-    client = AsyncIOMotorClient(TEST_MONGO_URI, tz_aware=True, serverSelectionTimeoutMS=3000)
+    if _unavailable:
+        pytest.fail(_unavailable)
+
+    client = AsyncIOMotorClient(TEST_MONGO_URI, tz_aware=True, serverSelectionTimeoutMS=2000)
     try:
         await client.admin.command("ping")
     except Exception as exc:  # noqa: BLE001
         client.close()
-        pytest.skip(f"No MongoDB at {TEST_MONGO_URI}: {exc}")
+        _unavailable = (
+            f"No MongoDB at {TEST_MONGO_URI} ({type(exc).__name__}). These tests run "
+            f"against a real server on purpose. Start one with:\n"
+            f"    docker run -d --name igsn-test-mongo -p 27117:27017 mongo:7\n"
+            f"or point IGSN_TEST_MONGO_URI elsewhere."
+        )
+        pytest.fail(_unavailable)
 
     db = client[TEST_DB_NAME]
     if not _indexes_ready:

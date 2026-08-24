@@ -86,14 +86,18 @@ async def requeue_stale(db=None) -> int:
     return result.modified_count
 
 
-async def _finish(db, attempt, status: str, error: str | None = None) -> None:
-    await db[ATTEMPTS].update_one(
-        {"_id": attempt["_id"]},
-        {"$set": {"status": status, "last_error": error, "updated": _now()}},
-    )
+async def _finish(
+    db, attempt, status: str, error: str | None = None, request: dict | None = None
+) -> None:
+    updates = {"status": status, "last_error": error, "updated": _now()}
+    if request is not None:
+        # Keep what was sent alongside what came back; a DataCite validation
+        # error names a field but never its value.
+        updates["last_request"] = request
+    await db[ATTEMPTS].update_one({"_id": attempt["_id"]}, {"$set": updates})
 
 
-async def _retry_later(db, attempt, error: str) -> None:
+async def _retry_later(db, attempt, error: str, request: dict | None = None) -> None:
     settings = get_settings()
     attempts = int(attempt.get("attempts", 0)) + 1
     if attempts >= settings.publisher_max_attempts:
@@ -107,13 +111,20 @@ async def _retry_later(db, attempt, error: str) -> None:
                     "status": "failed",
                     "attempts": attempts,
                     "last_error": error,
+                    "last_request": request,
                     "updated": _now(),
                 }
             },
         )
         await db[RECORDS].update_one(
             {"igsn": attempt["igsn"]},
-            {"$set": {"datacite.last_error": error, "updated": _now()}},
+            {
+                "$set": {
+                    "datacite.last_error": error,
+                    "datacite.last_request": request,
+                    "updated": _now(),
+                }
+            },
         )
         return
 
@@ -125,6 +136,7 @@ async def _retry_later(db, attempt, error: str) -> None:
                 "status": "queued",
                 "attempts": attempts,
                 "last_error": error,
+                "last_request": request,
                 "next_attempt_at": _now() + datetime.timedelta(seconds=delay),
                 "updated": _now(),
             }
@@ -164,16 +176,22 @@ async def process_attempt(attempt: dict, db=None) -> str:
     try:
         result = await datacite.submit(record, tenant, attempt["target"])
     except datacite.DataCiteError as exc:
+        # datacite.attempts counts tries, not successes -- a record stuck at 0
+        # after repeated failures tells you nothing about how hard we tried.
+        await db[RECORDS].update_one(
+            {"igsn": record["igsn"]}, {"$inc": {"datacite.attempts": 1}}
+        )
         if exc.retryable:
-            await _retry_later(db, attempt, str(exc))
+            await _retry_later(db, attempt, str(exc), request=exc.request)
             return "queued"
-        await _finish(db, attempt, "failed", str(exc))
+        await _finish(db, attempt, "failed", str(exc), request=exc.request)
         await db[RECORDS].update_one(
             {"igsn": record["igsn"]},
             {
                 "$set": {
                     "status": "failed",
                     "datacite.last_error": str(exc),
+                    "datacite.last_request": exc.request or None,
                     "updated": _now(),
                 }
             },
@@ -189,12 +207,13 @@ async def process_attempt(attempt: dict, db=None) -> str:
                 "published_at": record.get("published_at") or now,
                 "datacite.last_sync": result["synced_at"],
                 "datacite.last_error": None,
+                "datacite.last_request": result.get("request"),
                 "updated": now,
             },
             "$inc": {"datacite.attempts": 1},
         },
     )
-    await _finish(db, attempt, "done")
+    await _finish(db, attempt, "done", request=result.get("request"))
     logger.info("Published %s as %s", record["igsn"], result["status"])
     return "done"
 
@@ -229,6 +248,23 @@ async def run_forever() -> None:
         except Exception:  # noqa: BLE001
             logger.exception("Publisher loop iteration failed")
         await asyncio.sleep(settings.publisher_poll_seconds)
+
+
+async def attempts_for(igsn: str, db=None, limit: int = 20) -> list[dict]:
+    """Most recent publication attempts for one IGSN, newest first.
+
+    This is the debugging surface: each attempt carries the error DataCite
+    returned *and* the request summary that produced it.
+    """
+    db = db if db is not None else get_db()
+    cursor = (
+        db[ATTEMPTS].find({"igsn": igsn.upper()}).sort("created", -1).limit(limit)
+    )
+    out = []
+    async for doc in cursor:
+        doc["id"] = str(doc.pop("_id"))
+        out.append(doc)
+    return out
 
 
 async def get_attempt(attempt_id: str, db=None) -> dict | None:

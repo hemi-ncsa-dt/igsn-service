@@ -83,8 +83,9 @@ docker run -d --name igsn-test-mongo -p 27117:27017 mongo:7
 
 They run against a real MongoDB rather than a mock, because the two behaviors
 that matter most — atomic `$inc` and unique-index rejection — are exactly what a
-mock is most likely to fake. Point `IGSN_TEST_MONGO_URI` elsewhere if you like;
-tests skip with a clear message when no server is reachable.
+mock is most likely to fake. Point `IGSN_TEST_MONGO_URI` elsewhere if you like.
+A missing server **fails** the suite rather than skipping it: skipping produced
+a run that read as green while testing nothing.
 
 ## API
 
@@ -97,6 +98,7 @@ GET  /api/v1/records/{igsn}                  read a record
 GET  /api/v1/records                         list, tenant-scoped
 PUT  /api/v1/records/{igsn}                  replace metadata / landing page
 POST /api/v1/records/{igsn}/publish          queue DataCite publication
+GET  /api/v1/records/{igsn}/attempts         publication attempts + diagnostics
 POST /api/v1/records/{igsn}/revoke           tombstone a reserved identifier
 GET  /api/v1/vocabularies                    institutions + materials
 GET  /api/v1/prefixes/validate?prefix=       check a prefix, consuming nothing
@@ -106,6 +108,45 @@ GET  /{igsn}                                 public resolver (HTML or JSON)
 `POST /api/v1/identifiers` is **not idempotent** and must never be blindly
 retried — a retry consumes another block of sequence numbers. On an ambiguous
 failure, look the allocation up with `GET /api/v1/records?prefix=…` instead.
+
+## Debugging a failed publish
+
+A record that fails to publish records why, and what it sent:
+
+```bash
+# The error, plus a summary of the request that produced it
+curl -sH "Authorization: Bearer $TOKEN" \
+    https://igsn.example.org/api/v1/records/JHAMAA00001/attempts | jq
+
+# Same diagnostics on the record itself
+curl -sH "Authorization: Bearer $TOKEN" \
+    https://igsn.example.org/api/v1/records/JHAMAA00001 | jq .datacite
+```
+
+`datacite.last_request` / `attempts[].last_request` carry the `url`, `doi`,
+`prefix` and `event` actually submitted. This matters because DataCite's
+validation errors name a field but never echo its value — `{"source":"url",
+"title":"URL is not valid"}` says nothing about *which* URL. The service also
+appends it to the message: `... (we sent url='#igsn/JHAMAA00001')`.
+
+The publisher logs every submission at INFO (`DataCite POST … igsn=… url=…`)
+and rejections at WARNING with the response body; set `IGSN_LOG_LEVEL=DEBUG` to
+log full payloads. Credentials never appear in logs or in stored diagnostics.
+
+**Invalid landing pages** are the most common cause. A publishing system whose
+server-root setting is empty sends a relative value like `#igsn/JHAMAA00001`;
+these are now rejected before DataCite sees them, at allocation and on
+`PUT /records/{igsn}`, with an error naming the value. To repair records that
+already have one:
+
+```bash
+igsn-service fix-landing-pages --dry-run   # then without --dry-run
+```
+
+Clearing the field is the repair, not guessing a replacement: the record falls
+back to this service's own resolver, which is always valid. Already-published
+records are left alone — their URL is registered at DataCite and changing it is
+a deliberate act.
 
 ## Migration from Girder
 

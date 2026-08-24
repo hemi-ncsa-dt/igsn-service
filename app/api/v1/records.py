@@ -8,13 +8,14 @@ from fastapi import APIRouter, HTTPException, Query, status
 from ...auth import TenantDep
 from ...db import RECORDS, get_db
 from ...schemas import (
+    AttemptOut,
     PublishRequest,
     PublishResponse,
     RecordOut,
     RecordUpdate,
     WhoAmI,
 )
-from ...services import allocator, publisher
+from ...services import allocator, datacite, publisher
 from .common import serialize_record
 
 logger = logging.getLogger(__name__)
@@ -91,9 +92,16 @@ async def update_record(igsn: str, body: RecordUpdate, tenant: dict = TenantDep)
         metadata["doi"] = record["doi"]
         updates["metadata"] = metadata
     if body.landing_page is not None:
-        updates["landing_page"] = body.landing_page
+        # Refuse a landing page DataCite would reject, at the point where the
+        # caller can still be told which value was wrong. Storing it and failing
+        # later at publish time is how "#igsn/JHBBMX00001" reached DataCite.
+        try:
+            landing_page = datacite.validate_landing_url(body.landing_page)
+        except datacite.InvalidLandingUrl as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        updates["landing_page"] = landing_page
         if "metadata" in updates:
-            updates["metadata"]["url"] = body.landing_page
+            updates["metadata"]["url"] = landing_page
     if body.external_ref is not None:
         updates["external_ref"] = body.external_ref.model_dump()
 
@@ -126,6 +134,18 @@ async def publish_record(igsn: str, body: PublishRequest, tenant: dict = TenantD
         record["igsn"], tenant, body.target, recurse=body.recurse
     )
     return PublishResponse(attempts=attempts, queued=len(attempts))
+
+
+@router.get("/records/{igsn}/attempts", response_model=list[AttemptOut])
+async def list_attempts(igsn: str, tenant: dict = TenantDep, limit: int = 20):
+    """Publication attempts for a record, newest first.
+
+    The debugging entry point when a publish fails: each attempt carries the
+    error DataCite returned *and* a summary of the request that caused it, so a
+    bare "URL is not valid" can be traced to the actual URL sent.
+    """
+    record = await _load_for_tenant(igsn, tenant)
+    return [AttemptOut(**a) for a in await publisher.attempts_for(record["igsn"], limit=limit)]
 
 
 @router.post(

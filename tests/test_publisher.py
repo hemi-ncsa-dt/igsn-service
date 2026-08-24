@@ -169,3 +169,89 @@ class TestStaleClaims:
             },
         )
         assert await publisher.requeue_stale(database) == 0
+
+
+class TestPersistedDiagnostics:
+    """A failed publish has to leave behind enough to explain itself."""
+
+    @respx.mock
+    async def test_failure_records_what_was_sent(self, database, tenant, reserved):
+        _dois_route(422, json={"errors": [{"source": "url", "title": "URL is not valid"}]})
+        ids = await publisher.enqueue(reserved["igsn"], tenant, "findable")
+        await publisher.drain_once(database)
+
+        attempt = await publisher.get_attempt(ids[0])
+        assert attempt["status"] == "failed"
+        assert "URL is not valid" in attempt["last_error"]
+        # The request summary is the part that makes it actionable.
+        assert attempt["last_request"]["url"] == f"https://igsn.example.org/{reserved['igsn']}"
+        assert attempt["last_request"]["method"] == "POST"
+        assert attempt["last_request"]["doi"] == reserved["doi"]
+
+        record = await database["records"].find_one({"igsn": reserved["igsn"]})
+        assert record["datacite"]["last_request"]["url"]
+
+    @respx.mock
+    async def test_attempts_are_counted_even_when_they_fail(
+        self, database, tenant, reserved
+    ):
+        """A record stuck at attempts=0 after repeated failures tells you nothing."""
+        _dois_route(422, json={"errors": [{"source": "publisher"}]})
+        await publisher.enqueue(reserved["igsn"], tenant, "findable")
+        await publisher.drain_once(database)
+        record = await database["records"].find_one({"igsn": reserved["igsn"]})
+        assert record["datacite"]["attempts"] == 1
+
+    @respx.mock
+    async def test_transient_failure_records_the_request_too(
+        self, database, tenant, reserved
+    ):
+        _dois_route(503)
+        ids = await publisher.enqueue(reserved["igsn"], tenant, "findable")
+        await publisher.drain_once(database)
+        attempt = await publisher.get_attempt(ids[0])
+        assert attempt["status"] == "queued"
+        assert attempt["last_request"]["method"] == "POST"
+
+    @respx.mock
+    async def test_success_records_the_request(self, database, tenant, reserved):
+        _dois_route()
+        ids = await publisher.enqueue(reserved["igsn"], tenant, "findable")
+        await publisher.drain_once(database)
+        attempt = await publisher.get_attempt(ids[0])
+        assert attempt["status"] == "done"
+        assert attempt["last_request"]["method"] == "POST"
+        record = await database["records"].find_one({"igsn": reserved["igsn"]})
+        assert record["datacite"]["last_error"] is None
+        assert record["datacite"]["last_request"]["url"]
+
+    async def test_invalid_landing_page_fails_without_contacting_datacite(
+        self, database, tenant, reserved
+    ):
+        """respx is not mocking anything here: any HTTP call would error."""
+        await database["records"].update_one(
+            {"igsn": reserved["igsn"]},
+            {"$set": {"landing_page": "#igsn/" + reserved["igsn"]}},
+        )
+        ids = await publisher.enqueue(reserved["igsn"], tenant, "findable")
+        await publisher.drain_once(database)
+
+        attempt = await publisher.get_attempt(ids[0])
+        assert attempt["status"] == "failed"
+        assert "#igsn/" in attempt["last_error"]
+        assert "not an absolute http" in attempt["last_error"]
+
+    @respx.mock
+    async def test_attempts_for_returns_newest_first(self, database, tenant, reserved):
+        _dois_route(503)
+        await publisher.enqueue(reserved["igsn"], tenant, "registered")
+        await publisher.enqueue(reserved["igsn"], tenant, "findable")
+        attempts = await publisher.attempts_for(reserved["igsn"])
+        assert len(attempts) == 2
+        assert attempts[0]["created"] >= attempts[1]["created"]
+        assert all("id" in a and "_id" not in a for a in attempts)
+
+    async def test_attempts_for_is_empty_for_an_unpublished_record(
+        self, database, tenant, reserved
+    ):
+        assert await publisher.attempts_for(reserved["igsn"]) == []

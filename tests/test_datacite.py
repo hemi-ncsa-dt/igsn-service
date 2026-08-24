@@ -5,6 +5,7 @@ The payload assertions are pinned against what the hand-run
 those are known to work against the live API.
 """
 
+import datetime
 import json
 
 import httpx
@@ -149,13 +150,45 @@ class TestSubmit:
         assert payload["data"]["attributes"]["doi"] == "10.83961/jhamaa00001"
 
     @respx.mock
-    async def test_published_record_is_put(self, tenant, record):
+    async def test_previously_synced_record_is_put(self, tenant, record):
+        """The deciding field is last_sync, not status."""
         record["status"] = "findable"
+        record["datacite"] = {"last_sync": datetime.datetime.now(datetime.UTC)}
         route = respx.put(f"https://api.test.datacite.org/dois/{record['doi']}").mock(
             return_value=httpx.Response(200, json={})
         )
         await datacite.submit(record, tenant, "findable")
         assert route.called
+
+    @respx.mock
+    async def test_never_synced_failed_record_is_posted(self, tenant, record):
+        """A record whose first POST failed must not be stuck PUTting forever.
+
+        Keying the decision off `status` meant a "failed" record PUT a DOI that
+        was never created, got a 404, and could never recover.
+        """
+        record["status"] = "failed"
+        record["datacite"] = {"last_sync": None, "last_error": "earlier failure"}
+        post = respx.post("https://api.test.datacite.org/dois").mock(
+            return_value=httpx.Response(201, json={})
+        )
+        await datacite.submit(record, tenant, "findable")
+        assert post.called
+
+    @respx.mock
+    async def test_put_that_404s_falls_back_to_post(self, tenant, record):
+        """Recovers if DataCite lost the DOI, or last_sync is optimistic."""
+        record["status"] = "findable"
+        record["datacite"] = {"last_sync": datetime.datetime.now(datetime.UTC)}
+        respx.put(f"https://api.test.datacite.org/dois/{record['doi']}").mock(
+            return_value=httpx.Response(404, json={})
+        )
+        post = respx.post("https://api.test.datacite.org/dois").mock(
+            return_value=httpx.Response(201, json={})
+        )
+        result = await datacite.submit(record, tenant, "findable")
+        assert post.called
+        assert result["status"] == "findable"
 
     @respx.mock
     async def test_post_falls_back_to_put_when_doi_exists(self, tenant, record):
@@ -214,3 +247,180 @@ class TestSubmit:
         await datacite.submit(record, tenant, "findable")
         auth_header = route.calls[0].request.headers["authorization"]
         assert auth_header.startswith("Basic ")
+
+
+class TestLandingUrlPreflight:
+    """The failure this exists for.
+
+    Girder pushed ``landing_page="#igsn/JHBBMX00001"`` -- what
+    ``os.path.join('', '#igsn', igsn)`` produces when Girder's server-root
+    setting is empty. DataCite answered
+    ``{"source":"url","title":"URL is not valid"}`` with no echo of the value,
+    so the record just said "failed" and nothing pointed at the cause.
+    """
+
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            ("#igsn/JHBBMX00001", "not an absolute http"),
+            ("igsn/JHBBMX00001", "not an absolute http"),
+            ("/igsn/JHBBMX00001", "not an absolute http"),
+            ("ftp://example.org/x", "not an absolute http"),
+            ("", "is empty"),
+            ("   ", "is empty"),
+            (None, "is empty"),
+            ("http://localhost:8000/JHBBMX00001", "will not accept"),
+            ("https://girder/JHBBMX00001", "will not accept"),
+        ],
+    )
+    def test_rejected(self, url, expected):
+        with pytest.raises(datacite.InvalidLandingUrl, match=expected):
+            datacite.validate_landing_url(url)
+
+    def test_the_error_names_the_offending_value(self):
+        with pytest.raises(datacite.InvalidLandingUrl) as excinfo:
+            datacite.validate_landing_url("#igsn/JHBBMX00001")
+        message = str(excinfo.value)
+        assert "#igsn/JHBBMX00001" in message
+        # And points at the likely cause rather than leaving it to guesswork.
+        assert "server-root" in message
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://data.htmdec.org/#igsn/JHAMAA00001",
+            "https://girder.local.xarthisius.xyz/#igsn/JHAMAA00001",
+            "http://example.org/igsn/X",
+            "https://igsn.example.org/JHAMAA00001",
+        ],
+    )
+    def test_accepted(self, url):
+        assert datacite.validate_landing_url(url) == url
+
+    def test_whitespace_is_trimmed(self):
+        assert datacite.validate_landing_url("  https://example.org/x  ") == (
+            "https://example.org/x"
+        )
+
+    @respx.mock
+    async def test_submit_refuses_before_calling_datacite(self, tenant, record):
+        """Fail locally with a useful message instead of relaying a 422."""
+        record["landing_page"] = "#igsn/JHAMAA00001"
+        route = respx.post("https://api.test.datacite.org/dois")
+        with pytest.raises(datacite.InvalidLandingUrl, match="#igsn/JHAMAA00001"):
+            await datacite.submit(record, tenant, "findable")
+        assert not route.called
+
+    async def test_the_refusal_is_terminal(self, tenant, record):
+        record["landing_page"] = "#igsn/JHAMAA00001"
+        with pytest.raises(datacite.InvalidLandingUrl) as excinfo:
+            await datacite.submit(record, tenant, "findable")
+        # Retrying a malformed URL forever would just burn attempts.
+        assert excinfo.value.retryable is False
+        assert excinfo.value.status_code == 422
+
+
+class TestRequestDiagnostics:
+    """What was sent, kept alongside what came back."""
+
+    def test_summary_captures_the_fields_datacite_rejects(self, tenant, record):
+        attributes = datacite.build_attributes(record, tenant, "findable")
+        summary = datacite.summarize_request(
+            "POST", "https://api.test.datacite.org/dois", attributes
+        )
+        assert summary["method"] == "POST"
+        assert summary["endpoint"] == "https://api.test.datacite.org/dois"
+        assert summary["url"] == "https://igsn.example.org/JHAMAA00001"
+        assert summary["doi"] == "10.83961/jhamaa00001"
+        assert summary["event"] == "publish"
+        assert summary["counts"]["creators"] == 1
+        assert summary["counts"]["titles"] == 1
+
+    def test_summary_omits_credentials(self, tenant, record):
+        attributes = datacite.build_attributes(record, tenant, "findable")
+        summary = datacite.summarize_request("POST", "https://x/dois", attributes)
+        blob = json.dumps(summary)
+        assert "s3cret" not in blob
+        assert "password" not in blob.lower()
+
+    @respx.mock
+    async def test_error_carries_the_request(self, tenant, record):
+        respx.post("https://api.test.datacite.org/dois").mock(
+            return_value=httpx.Response(
+                422, text='{"errors":[{"source":"publisher","title":"is missing"}]}'
+            )
+        )
+        with pytest.raises(datacite.DataCiteError) as excinfo:
+            await datacite.submit(record, tenant, "findable")
+        request = excinfo.value.request
+        assert request["method"] == "POST"
+        assert request["doi"] == "10.83961/jhamaa00001"
+        assert request["url"] == "https://igsn.example.org/JHAMAA00001"
+
+    @respx.mock
+    async def test_error_message_echoes_the_field_datacite_named(self, tenant, record):
+        """The exact failure the user hit, made self-explanatory.
+
+        DataCite says the url is invalid without saying which url; the message
+        now appends the value we sent.
+        """
+        record["landing_page"] = "https://ok.example.org/x"
+        respx.post("https://api.test.datacite.org/dois").mock(
+            return_value=httpx.Response(
+                422,
+                text='{"errors":[{"source":"url","title":"URL is not valid",'
+                '"uid":"10.83961/jhamaa00001"}]}',
+            )
+        )
+        with pytest.raises(datacite.DataCiteError) as excinfo:
+            await datacite.submit(record, tenant, "findable")
+        assert "we sent url='https://ok.example.org/x'" in str(excinfo.value)
+
+    @respx.mock
+    async def test_success_returns_the_request(self, tenant, record):
+        respx.post("https://api.test.datacite.org/dois").mock(
+            return_value=httpx.Response(201, json={})
+        )
+        result = await datacite.submit(record, tenant, "findable")
+        assert result["request"]["method"] == "POST"
+
+    @respx.mock
+    async def test_outgoing_request_is_logged_without_the_auth_header(
+        self, tenant, record, caplog
+    ):
+        respx.post("https://api.test.datacite.org/dois").mock(
+            return_value=httpx.Response(201, json={})
+        )
+        with caplog.at_level("INFO", logger="app.services.datacite"):
+            await datacite.submit(record, tenant, "findable")
+        logged = caplog.text
+        assert "DataCite POST" in logged
+        assert "JHAMAA00001" in logged
+        assert "https://igsn.example.org/JHAMAA00001" in logged
+        assert "s3cret" not in logged
+
+    @respx.mock
+    async def test_rejection_is_logged_with_the_response_body(
+        self, tenant, record, caplog
+    ):
+        respx.post("https://api.test.datacite.org/dois").mock(
+            return_value=httpx.Response(422, text='{"errors":[{"source":"url"}]}')
+        )
+        with caplog.at_level("WARNING", logger="app.services.datacite"):
+            with pytest.raises(datacite.DataCiteError):
+                await datacite.submit(record, tenant, "findable")
+        logged = caplog.text
+        assert "rejected" in logged
+        assert "source" in logged
+
+    async def test_preflight_failure_still_reports_what_it_rejected(
+        self, tenant, record
+    ):
+        """A preflight rejection has to be as legible as a DataCite one."""
+        record["landing_page"] = "#igsn/JHAMAA00001"
+        with pytest.raises(datacite.InvalidLandingUrl) as excinfo:
+            await datacite.submit(record, tenant, "findable")
+        request = excinfo.value.request
+        assert request["url"] == "#igsn/JHAMAA00001"
+        assert request["doi"] == "10.83961/jhamaa00001"
+        assert request["rejected_by"] == "preflight"
