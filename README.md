@@ -110,6 +110,11 @@ the full resolved dependency tree so two builds of the same commit install the
 same versions; regenerate it whenever `pyproject.toml` dependencies change (its
 header says how).
 
+CI (`.github/workflows/ci.yml`) runs the suite against a real MongoDB, lints,
+and starts the built container the way Kubernetes starts it — read-only root
+filesystem, all capabilities dropped, uid 10001 — before publishing to
+`ghcr.io/hemi-ncsa-dt/igsn-service`. There is deliberately no `latest` tag.
+
 Kubernetes manifests for materials-igsn.org live in
 `../../materials-igsn/deployment`.
 

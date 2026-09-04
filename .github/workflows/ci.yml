@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+env:
+  # ghcr.io/hemi-ncsa-dt/igsn-service
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # The suite runs against a real MongoDB and *fails* rather than skips
+      # without one -- skipping produced a run that read as green while testing
+      # nothing. 27117 matches the default in tests/conftest.py.
+      mongo:
+        image: mongo:7
+        ports: ["27117:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping:1})'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Deliberately NOT installed against constraints.txt: CI should notice
+      # when a floating upper bound in pyproject.toml breaks, while the image
+      # stays pinned. The container smoke below is what exercises the pinned set.
+      - run: pip install -e '.[dev]'
+
+      - run: ruff check app tests
+
+      - run: pytest -q
+
+      - name: Build the image and smoke it under the production security context
+        # readOnlyRootFilesystem, dropped capabilities and a non-root uid are
+        # exactly the kind of thing that regresses silently, so the container is
+        # started here the way Kubernetes starts it rather than however Docker
+        # defaults. Uses the mongo service already running for the suite.
+        run: |
+          docker build -t igsn-service:ci .
+          docker run -d --name smoke --network host \
+            --read-only --tmpfs /tmp \
+            --cap-drop ALL --security-opt no-new-privileges --user 10001 \
+            -e IGSN_MONGO_URI=mongodb://localhost:27117 \
+            -e IGSN_MONGO_DB=igsn_ci \
+            -e IGSN_PUBLIC_URL=https://materials-igsn.org \
+            -e IGSN_DATACITE_ENABLED=false \
+            -e IGSN_PUBLISHER_ENABLED=false \
+            igsn-service:ci
+          for _ in $(seq 1 30); do
+            curl -fsS localhost:8000/readyz >/dev/null 2>&1 && break
+            sleep 2
+          done
+          echo "readyz:  $(curl -fsS localhost:8000/readyz)"
+          echo "healthz: $(curl -fsS localhost:8000/healthz)"
+          test "$(docker inspect -f '{{.Config.User}}' igsn-service:ci)" = "10001"
+
+      - if: always()
+        run: docker logs smoke 2>&1 | tail -30 || true
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        # Skipped on pull requests: a fork PR has no write token, and nothing
+        # is pushed from one anyway.
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          # No `latest`. The manifests pin an immutable reference on purpose --
+          # a rollout you cannot name is a rollout you cannot roll back. Tag a
+          # release (v0.1.0) to get a version tag; every build also gets an
+          # immutable sha- tag that is always safe to deploy.
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-,format=short
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Built on PRs to catch a broken Dockerfile, pushed only afterwards.
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
