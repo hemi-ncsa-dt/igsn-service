@@ -220,6 +220,10 @@ async def process_attempt(attempt: dict, db=None) -> str:
 
 async def drain_once(db=None) -> int:
     """Process every attempt that is currently due. Returns how many ran."""
+    if not get_settings().datacite_enabled:
+        # Return before claiming anything: a claimed-then-abandoned attempt
+        # would sit "running" until requeue_stale picks it up ten minutes later.
+        return 0
     db = db if db is not None else get_db()
     processed = 0
     while True:
@@ -236,6 +240,11 @@ async def drain_once(db=None) -> int:
 
 async def run_forever() -> None:
     settings = get_settings()
+    if not settings.datacite_enabled:
+        logger.warning(
+            "Publisher loop refusing to start: IGSN_DATACITE_ENABLED is false"
+        )
+        return
     db = get_db()
     await requeue_stale(db)
     logger.info("Publisher loop started (poll=%ss)", settings.publisher_poll_seconds)

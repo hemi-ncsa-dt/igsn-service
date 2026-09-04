@@ -26,6 +26,16 @@ class Settings(BaseSettings):
     # DataCite for records that carry no tenant landing page.
     public_url: str = "http://localhost:8000"
 
+    # Master switch for every outbound *write* to DataCite. False means no code
+    # path can create or update a DOI: publish requests are refused with 503
+    # instead of queueing silently, and the drain loop claims nothing. This is a
+    # policy flag (may we spend money at DataCite?), separate from
+    # publisher_enabled below, which is a topology flag (does *this* process run
+    # the drain loop?). Reads -- datacite.fetch(), used by `sync-status` -- stay
+    # available, because learning what DataCite already has is free and is a
+    # prerequisite for turning publication on safely.
+    datacite_enabled: bool = True
+
     # Background publisher loop.
     publisher_enabled: bool = True
     publisher_poll_seconds: float = 5.0
