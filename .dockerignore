@@ -1,0 +1,19 @@
+# The build context is uploaded to the daemon in full; without this it carries
+# a ~100MB venv and the whole git history for a three-COPY Dockerfile.
+.git
+.gitignore
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.env
+tests/
+deploy/

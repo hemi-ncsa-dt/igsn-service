@@ -223,6 +223,15 @@ async def submit(record: dict, tenant: dict, target: str) -> dict:
     does not have becomes a POST.
     """
     settings = get_settings()
+    if not settings.datacite_enabled:
+        # The backstop, not the control. Callers are gated further up (the
+        # publish endpoint 503s, the drain loop claims nothing); this exists so
+        # that no path at all -- a direct call, a stray script -- can create a
+        # DOI while publication is switched off. fetch() is deliberately not
+        # gated: reads cost nothing and `sync-status` needs them.
+        raise DataCiteNotConfigured(
+            "DataCite publication is disabled (IGSN_DATACITE_ENABLED is false)"
+        )
     repository_id, password = _auth(tenant)
     api_base = (tenant["datacite"].get("api_base") or "https://api.datacite.org").rstrip("/")
     attributes = build_attributes(record, tenant, target)

@@ -6,6 +6,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Query, status
 
 from ...auth import TenantDep
+from ...config import get_settings
 from ...db import RECORDS, get_db
 from ...schemas import (
     AttemptOut,
@@ -109,7 +110,17 @@ async def update_record(igsn: str, body: RecordUpdate, tenant: dict = TenantDep)
     updated = await get_db()[RECORDS].find_one({"igsn": record["igsn"]})
 
     if updated["status"] in ("registered", "findable"):
-        await publisher.enqueue(updated["igsn"], tenant, updated["status"])
+        if get_settings().datacite_enabled:
+            await publisher.enqueue(updated["igsn"], tenant, updated["status"])
+        else:
+            # The local record is updated either way; only the push is skipped.
+            # Logged rather than silent, because it leaves DataCite holding
+            # stale metadata for a live DOI until someone re-publishes.
+            logger.warning(
+                "%s updated but not queued for DataCite: IGSN_DATACITE_ENABLED "
+                "is false. Re-publish it when publication is turned on.",
+                updated["igsn"],
+            )
 
     return serialize_record(updated)
 
@@ -121,6 +132,19 @@ async def publish_record(igsn: str, body: PublishRequest, tenant: dict = TenantD
     Returns as soon as the attempts are durably queued; the background publisher
     does the work with retries. Poll ``GET /records/{igsn}`` for the outcome.
     """
+    if not get_settings().datacite_enabled:
+        # Refuse rather than queue. A queued attempt with the drain loop off
+        # looks accepted and does nothing, then fires as a backlog the moment
+        # publication is enabled -- which is real money, unreviewed.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "DataCite publication is disabled on this deployment "
+                "(IGSN_DATACITE_ENABLED is false). The identifier is allocated "
+                "and resolvable; nothing was queued."
+            ),
+        )
+
     record = await _load_for_tenant(igsn, tenant)
     if record["status"] == "revoked":
         raise HTTPException(status_code=409, detail=f"{record['igsn']} is revoked")

@@ -66,13 +66,57 @@ Configuration is environment-driven with an `IGSN_` prefix (see `app/config.py`)
 | `IGSN_MONGO_DB` | `igsn` | |
 | `IGSN_ADMIN_TOKEN` | *(unset)* | Admin API token. Unset **disables** the admin API. |
 | `IGSN_PUBLIC_URL` | `http://localhost:8000` | Used to build resolver URLs registered with DataCite. |
-| `IGSN_PUBLISHER_ENABLED` | `true` | Background publication loop. |
+| `IGSN_DATACITE_ENABLED` | `true` | Master switch for DataCite **writes**. See below. |
+| `IGSN_PUBLISHER_ENABLED` | `true` | Whether *this* process runs the publication loop. |
 | `IGSN_PUBLISHER_MAX_ATTEMPTS` | `8` | |
+
+The two publication flags answer different questions and both must be true for
+anything to reach DataCite. `IGSN_PUBLISHER_ENABLED` is topology — does this
+process run the drain loop, so that scaling the API does not multiply the
+number of loops. `IGSN_DATACITE_ENABLED` is policy — may this deployment spend
+money at DataCite at all. With the latter false:
+
+- `POST /records/{igsn}/publish` returns **503 and queues nothing**. Refusing
+  beats queueing: a queued attempt with no drain loop looks accepted, does
+  nothing, and then fires as an unreviewed backlog the moment publication is
+  enabled.
+- `PUT /records/{igsn}` still updates the record but logs, rather than queues,
+  the DataCite push it would normally trigger for a published record.
+- `drain_once` claims nothing and `datacite.submit` refuses outright, so no
+  path at all — not a stray script, not a direct call — can create a DOI.
+- `datacite.fetch` is deliberately **not** gated. Reads are free, and
+  `sync-status` needs them to learn what DataCite already has, which is a
+  prerequisite for turning publication on safely.
+
+Everything else stays fully live: allocation, children, metadata validation,
+and the resolver.
 
 DataCite passwords are **not** stored in Mongo. A tenant names the environment
 variable holding its Fabrica password (`datacite.password_env`), and the value is
 read from the process environment at publication time — so a database dump is
 not a credential leak.
+
+`GET /healthz` is liveness and deliberately does not touch Mongo — a database
+outage should fail requests, not restart every process. `GET /readyz` pings
+Mongo and is what a load balancer should use: every other route needs the
+database, so an instance that cannot reach it should stop receiving traffic
+rather than 500 it.
+
+## Deployment
+
+`Dockerfile` builds an unprivileged image (uid 10001) that runs under a
+read-only root filesystem with all capabilities dropped. `constraints.txt` pins
+the full resolved dependency tree so two builds of the same commit install the
+same versions; regenerate it whenever `pyproject.toml` dependencies change (its
+header says how).
+
+CI (`.github/workflows/ci.yml`) runs the suite against a real MongoDB, lints,
+and starts the built container the way Kubernetes starts it — read-only root
+filesystem, all capabilities dropped, uid 10001 — before publishing to
+`ghcr.io/hemi-ncsa-dt/igsn-service`. There is deliberately no `latest` tag.
+
+Kubernetes manifests for materials-igsn.org live in
+`../../materials-igsn/deployment`.
 
 ## Tests
 
